@@ -43,6 +43,8 @@
 #include "md5.h"
 #include <fat.h>
 #include "m2loader/m2loader.h"
+#include "disc_source.h"
+#include "usb_exi.h"
 
 #define DEFAULT_FIFO_SIZE    (256*1024)//(64*1024) minimum
 
@@ -98,6 +100,20 @@ GXRModeObj *vmode = NULL;
 u32 *xfb[2] = { NULL, NULL };
 int options_map[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 int newProgressDisplay = 1;
+
+/* 現在使用中のディスク読み出し元（既定は内蔵 DI） */
+static disc_source_t *active_source = &disc_source_gc_di;
+
+/* 内蔵 DI 専用の操作を、選択中ソースに応じて振り分ける薄いラッパー */
+static void source_motor_off(int eject) {
+	if (active_source == &disc_source_gc_di)
+		dvd_motor_off(eject);
+}
+
+static const char *source_error_str(void) {
+	return (active_source == &disc_source_gc_di) ? dvd_error_str()
+	                                             : usb_exi_last_error();
+}
 
 enum {
 	MSG_SETFILE,
@@ -471,7 +487,25 @@ static int initialise_dvd() {
 	DrawEmptyBox(30, 180, vmode->fbWidth - 38, 350, COLOR_BLACK);
 	WriteCentre(255, "Initialising Disc ...");
 	DrawFrameFinish();
-	int ret = init_dvd();
+
+	int ret;
+	if (active_source && active_source != &disc_source_gc_di) {
+		/* 内蔵 DI 以外（外付け USB ドライブ等）のソース */
+		ret = active_source->init();
+		if (ret != 0) {
+			DrawFrameStart();
+			DrawEmptyBox(30, 180, vmode->fbWidth - 38, 350, COLOR_BLACK);
+			sprintf(txtbuffer, "%s を初期化できません", active_source->name);
+			WriteCentre(230, txtbuffer);
+			WriteCentre(255, (char *)usb_exi_last_error());
+			print_gecko("Source init failed: %s\r\n", usb_exi_last_error());
+			DrawFrameFinish();
+			sleep(3);
+		}
+		return ret;
+	}
+
+	ret = init_dvd();
 
 	if (ret == NO_DISC) {
 		DrawFrameStart();
@@ -485,6 +519,9 @@ static int initialise_dvd() {
 }
 
 #ifdef HW_DOL
+/* SD スロットのデバイス名（後方で定義。ここでは前方参照のみ） */
+static const char *sd_slot_device_name(int slot);
+
 int select_sd_gecko_slot() {
 	int slot = 0;
 	while ((get_buttons_pressed() & PAD_BUTTON_A));
@@ -495,6 +532,10 @@ int select_sd_gecko_slot() {
 		DrawSelectableButton(100, 310, -1, 340, "Slot A", slot == 0 ? B_SELECTED : B_NOSELECT, -1);
 		DrawSelectableButton(240, 310, -1, 340, "Slot B", slot == 1 ? B_SELECTED : B_NOSELECT, -1);
 		DrawSelectableButton(380, 310, -1, 340, "SD2SP2", slot == 2 ? B_SELECTED : B_NOSELECT, -1);
+		/* 接続デバイスを表示（USB Dolphin は SD 互換として認識される） */
+		sprintf(txtbuffer, "A: %s   B: %s   SP2: %s",
+			sd_slot_device_name(0), sd_slot_device_name(1), sd_slot_device_name(2));
+		WriteFontStyled(320, 370, txtbuffer, 0.65f, true, defaultColor);
 		DrawFrameFinish();
 		while (!(get_buttons_pressed() & (PAD_BUTTON_RIGHT | PAD_BUTTON_LEFT
 				| PAD_BUTTON_B | PAD_BUTTON_A)));
@@ -526,6 +567,31 @@ DISC_INTERFACE* get_sd_card_handler(int slot) {
 		default: /* Also handles case 0 */
 			return get_io_gcsda();
 	}
+}
+
+/* 指定 SD スロットに接続されたデバイスの表示名を返す。
+ * USB Dolphin は SD 互換デバイスとして振る舞い、EXI のプロダクト名が "USBGC"。
+ * 判定結果はスロットごとにキャッシュする。 */
+static const char *sd_slot_device_name(int slot) {
+	static const char *names[3] = { NULL, NULL, NULL };
+	static bool probed[3] = { false, false, false };
+
+	if (slot < 0 || slot > 2)
+		return "不明";
+
+	if (!probed[slot]) {
+		DISC_INTERFACE *dev = get_sd_card_handler(slot);
+		probed[slot] = true;
+		names[slot] = "未接続";
+		if (dev && dev->startup(dev)) {
+			if (strncmp(PRODUCT_NAME(slot), "USBGC", 5) == 0)
+				names[slot] = "USB Dolphin";
+			else
+				names[slot] = "SD Gecko";
+			dev->shutdown(dev);
+		}
+	}
+	return names[slot];
 }
 #endif
 
@@ -625,8 +691,8 @@ static int identify_disc() {
 	char readbuf[2048] __attribute__((aligned(32)));
 
 	memset(&internalName[0],0,512);
-	// Read the header
-	DVD_LowRead64(readbuf, 2048, 0ULL);
+	// Read the header（選択中のディスクソースから読む）
+	active_source->read(readbuf, 2048, 0ULL);
 	if (readbuf[0]) {
 		strncpy(&gameName[0], readbuf, 6);
 		gameName[6] = 0;
@@ -733,7 +799,7 @@ void select_device_type(int* select_ptr, bool logDevice) {
 				(*select_ptr == TYPE_M2LOADER) ? B_SELECTED : B_NOSELECT, -1);
 		if(*select_ptr == TYPE_SD) {
 			WriteFontStyled(320, 370, "SD Cards are supported via devices such as:", 0.65f, true, defaultColor);
-			WriteFontStyled(320, 390, "SD Gecko, SD2SP2, GC2SD, FlipperMCE / GCMCE", 0.65f, true, defaultColor);
+			WriteFontStyled(320, 390, "SD Gecko, SD2SP2, GC2SD, FlipperMCE / GCMCE, USB Dolphin", 0.65f, true, defaultColor);
 		}
 #endif
 #ifdef HW_RVL
@@ -771,6 +837,58 @@ void select_device_type(int* select_ptr, bool logDevice) {
 				| PAD_BUTTON_B | PAD_BUTTON_A)));
 	}
 	while ((get_buttons_pressed() & PAD_BUTTON_A));
+}
+
+/* ディスク読み出し元（内蔵 DI / 外付けドライブ）を選択する。
+ * 外付けソースが利用できるときだけ選択画面を出す。 */
+static void select_disc_source(void) {
+	int count = disc_source_count();
+	int i, n = 0;
+	int idx[8];
+	int sel = 0;
+
+	for (i = 0; i < count && n < 8; i++) {
+		const disc_source_t *s = disc_source_get(i);
+		if (s && s->available())
+			idx[n++] = i;
+	}
+
+	/* 既定（内蔵 DI）以外が使えなければ何も聞かない */
+	if (n <= 1) {
+		active_source = (disc_source_t *)disc_source_default();
+		return;
+	}
+
+	while ((get_buttons_pressed() & PAD_BUTTON_A));
+	while (1) {
+		DrawFrameStart();
+		DrawEmptyBox(30, 180, vmode->fbWidth - 38, 350, COLOR_BLACK);
+		WriteCentre(230, "Please select the disc source");
+		for (i = 0; i < n; i++) {
+			const disc_source_t *s = disc_source_get(idx[i]);
+			DrawSelectableButton(40 + (i * 170), 310, -1, 340, (char *)s->short_name,
+				(sel == i) ? B_SELECTED : B_NOSELECT, -1);
+		}
+		WriteFontStyled(320, 370, (char *)disc_source_get(idx[sel])->name, 0.7f, true, defaultColor);
+		DrawFrameFinish();
+		while (!(get_buttons_pressed() & (PAD_BUTTON_RIGHT | PAD_BUTTON_LEFT | PAD_BUTTON_A)));
+		u32 btns = get_buttons_pressed();
+		if (btns & PAD_BUTTON_RIGHT) {
+			sel++;
+			if (sel >= n) sel = 0;
+		}
+		if (btns & PAD_BUTTON_LEFT) {
+			sel--;
+			if (sel < 0) sel = n - 1;
+		}
+		if (btns & PAD_BUTTON_A)
+			break;
+		while ((get_buttons_pressed() & (PAD_BUTTON_RIGHT | PAD_BUTTON_LEFT | PAD_BUTTON_A)));
+	}
+	while ((get_buttons_pressed() & PAD_BUTTON_A));
+
+	active_source = (disc_source_t *)disc_source_get(idx[sel]);
+	print_gecko("Disc source: %s\r\n", active_source->name);
 }
 
 /* the user must specify the file system type */
@@ -943,7 +1061,7 @@ void prompt_new_file(FILE **fp, int chunk, int fs, int silent) {
 #endif
 		}
 		// Stop the disc if we're going to wait on the user
-		dvd_motor_off(0);
+		source_motor_off(0);
 	}
 
 	if(silent == ASK_USER) {
@@ -1022,7 +1140,7 @@ void prompt_new_file(FILE **fp, int chunk, int fs, int silent) {
 		exit(0);
 	}
 	if(silent == ASK_USER) {
-		init_dvd();
+		active_source->init();
 	}
 }
 
@@ -1034,7 +1152,8 @@ void dump_bca() {
 		char bca_data[64] __attribute__((aligned(32)));
 		DCZeroRange(bca_data, 64);
 		DCFlushRange(bca_data, 64);
-		dvd_read_bca(bca_data);
+		if (active_source == &disc_source_gc_di)
+			dvd_read_bca(bca_data);
 		fwrite(bca_data, 1, 0x40, fp);
 		fclose(fp);
 	}
@@ -1276,7 +1395,7 @@ int dump_game(int disc_type, int fs) {
 				ret = 0;
 		}
 		else
-			ret = DVD_LowRead64(wmsg->data, (u32)opt_read_size, (u64)startLBA << 11);
+			ret = active_source->read(wmsg->data, (u32)opt_read_size, (u64)startLBA << 11);
 		
 		usleep(50);
 		MQ_Send(msgq, (mqmsg_t)wmsg, MQ_MSG_BLOCK);
@@ -1362,10 +1481,10 @@ int dump_game(int disc_type, int fs) {
 	if(ret != -61 && ret) {
 		DrawFrameStart();
 		DrawEmptyBox (30,180, vmode->fbWidth-38, 350, COLOR_BLACK);
-		sprintf(txtbuffer, "%s",dvd_error_str());
+		sprintf(txtbuffer, "%s",source_error_str());
 		print_gecko("Error: %s\r\n",txtbuffer);
 		WriteCentre(255,txtbuffer);
-		dvd_motor_off(1);
+		source_motor_off(1);
 		wait_press_A("to continue");
 		return 0;
 	}
@@ -1375,7 +1494,7 @@ int dump_game(int disc_type, int fs) {
 		sprintf(txtbuffer, "Copy Cancelled");
 		print_gecko("%s\r\n",txtbuffer);
 		WriteCentre(255,txtbuffer);
-		dvd_motor_off(0);
+		source_motor_off(0);
 		wait_press_A("to continue");
 		return 0;
 	}
@@ -1471,7 +1590,7 @@ int dump_game(int disc_type, int fs) {
 			renameFile(&mountPath[0], &gameName[0], &tempstr[0], ".skp");
 			renameFile(&mountPath[0], &gameName[0], &tempstr[0], ".bca");
 		}
-		dvd_motor_off(1);
+		source_motor_off(1);
 		wait_press_A_exit_B(false);
 	}
 	return 1;
@@ -1505,6 +1624,9 @@ int main(int argc, char **argv) {
 	// Ask the user if they want checksum calculations enabled this time?
 	calcChecksums = DrawYesNoDialog("Enable checksum calculations?",
 									"(Enabling will add about 3 minutes)");
+
+	// ディスク読み出し元を選択（内蔵 DI 以外が使えるときのみ表示）
+	select_disc_source();
 
 	int reuseSettings = NOT_ASKED;
 	while (1) {

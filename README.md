@@ -2,6 +2,30 @@
 A tool to backup your Gamecube/Wii Discs via IOS58
 Create 1:1 backups of your GC/Wii discs for archival purposes without any requirements for custom IOS (cIOS). Supports USB 2.0 / NTFS / exFAT & Front SD.
 
+---
+
+## このフォークについて（日本語）
+
+上流 [emukidid/cleanrip](https://github.com/emukidid/cleanrip) のフォーク。
+GameCube (DOL-101) から **外付け USB 光学ドライブ**でディスクを吸い出すための
+機能を追加している。
+
+- **USB Dolphin (Slot A/B)** を SD 互換ストレージとして検出・表示（出力先）
+- **ディスクソース抽象化** (`disc_source`)：内蔵 DI と外付けドライブを差し替え可能に
+- **自作 USB-EXI アダプタ (RP2040)** 経由の外付けドライブ読み出し
+  （`0xE7` 等の vendor CDB を含む任意 SCSI コマンドを送れる）
+
+関連ドキュメント:
+
+- `docs/USB-EXI-ADAPTER.md` … アダプタのプロトコル・結線・検証手順
+- `docs/MAKEO-FEATURE-REQUEST.md` … 既製 USB Dolphin への要望文面
+- `hardware/usb-exi-adapter/` … RP2040 ファームウェア
+- `AGENTS.md` … リポジトリ構成と作業ルール
+
+ライセンスは上流と同じ **GPL-2.0** を継承する。
+
+---
+
 # Support
 If you have any questions about CleanRip, please make a thread over at http://www.gc-forever.com/
 

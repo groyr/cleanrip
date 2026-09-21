@@ -1,5 +1,25 @@
 build/
+build_gc/
 cleanrip.elf
 cleanrip.dol
 cleanrip-gc.dol
 cleanrip-gc.elf
+CleanRip.elf
+CleanRip.dol
+*.map
+*.o
+*.d
+*.a
+
+# Pico アダプタのファーム（pico-sdk / CMake）
+hardware/**/build/
+hardware/**/*.uf2
+hardware/**/*.elf
+hardware/**/*.bin
+
+# エディタ・OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
